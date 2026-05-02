@@ -1,0 +1,9 @@
+[package]
+name = "mopidy-sound-visualizer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gstreamer = "0.24.5"
+gstreamer-app = "0.24.5"
+tokio = "1.52.1"
