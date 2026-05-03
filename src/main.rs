@@ -1,5 +1,11 @@
+use std::{convert::Infallible, sync::Arc};
+
+use axum::{
+    Router, extract::State, response::sse::{Event, KeepAlive, Sse}, routing::get
+};
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
+use tokio_stream::{StreamExt, wrappers::WatchStream};
 
 fn stream(
     sender: tokio::sync::watch::Sender<Vec<f32>>,
@@ -76,11 +82,42 @@ fn stream(
     })
 }
 
+struct AppState {
+    rx: tokio::sync::watch::Receiver<Vec<f32>>,
+}
+
+async fn sse_handler(State(state): State<Arc<AppState>>) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    // A `Stream` that repeats an event every second
+    let stream = tokio_stream::wrappers::WatchStream::new(state.rx.clone())
+        .map(|data| {
+            let text = format!("{:?}", data);
+            Ok(Event::default().data(text))
+        });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn serve_web(shared_state: Arc<AppState>, cancel_token: tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<()> {
+    let app = Router::<Arc<AppState>>::new().route("/sse", get(sse_handler)).with_state(shared_state);
+
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+
+        tokio::select! {
+            _ = axum::serve(listener, app) => (),
+            _ = cancel_token.cancelled() => (),
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() {
     let (tx, mut rx) = tokio::sync::watch::channel(Vec::<f32>::new());
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    let stream = stream(tx, cancel_token.clone());
+    let stream_handle = stream(tx, cancel_token.clone());
+
+    let shared_state = Arc::new(AppState{rx: rx.clone()});
+    let web_server_handle = serve_web(shared_state, cancel_token.clone());
 
     loop {
         tokio::select! {
@@ -90,9 +127,10 @@ async fn main() {
             },
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                 println!("Odebrane pasma FFT: {:?}", rx.borrow_and_update());
-            }
+            },
         }
     }
 
-    stream.await.unwrap();
+    stream_handle.await.unwrap();
+    web_server_handle.await.unwrap();
 }
