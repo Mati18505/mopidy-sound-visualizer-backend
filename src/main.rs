@@ -5,7 +5,7 @@ use axum::{
 };
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
-use tokio_stream::{StreamExt, wrappers::WatchStream};
+use tokio_stream::StreamExt;
 
 fn stream(
     sender: tokio::sync::watch::Sender<Vec<f32>>,
@@ -87,18 +87,16 @@ struct AppState {
 }
 
 async fn sse_handler(State(state): State<Arc<AppState>>) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    // A `Stream` that repeats an event every second
     let stream = tokio_stream::wrappers::WatchStream::new(state.rx.clone())
         .map(|data| {
-            let text = format!("{:?}", data);
-            Ok(Event::default().data(text))
+            Ok(Event::default().json_data(data).unwrap())
         });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 fn serve_web(shared_state: Arc<AppState>, cancel_token: tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<()> {
-    let app = Router::<Arc<AppState>>::new().route("/sse", get(sse_handler)).with_state(shared_state);
+    let app = Router::<Arc<AppState>>::new().route("/sse", get(sse_handler)).layer(tower_http::cors::CorsLayer::permissive()).with_state(shared_state);
 
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
