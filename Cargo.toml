@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 gstreamer = "0.24.5"
 gstreamer-app = "0.24.5"
-tokio = "1.52.1"
+tokio = { version = "1.52.1", features = ["full"] }
+tokio-util = "0.7.18"
