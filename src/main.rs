@@ -15,7 +15,7 @@ fn stream(
         gst::init().expect("initialization failed");
 
         let pipeline_str = "
-            udpsrc port=5001 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
+            udpsrc port=5555 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
             queue ! audioconvert ! audioresample !
             spectrum name=spec bands=64 ! fakesink
         ";
@@ -34,7 +34,7 @@ fn stream(
             }
 
             let msg = bus.timed_pop_filtered(
-                gst::ClockTime::from_mseconds(100),
+                gst::ClockTime::from_mseconds(10),
                 &[
                     gst::MessageType::Error,
                     gst::MessageType::Eos,
@@ -117,14 +117,19 @@ async fn main() {
     let shared_state = Arc::new(AppState{rx: rx.clone()});
     let web_server_handle = serve_web(shared_state, cancel_token.clone());
 
+    let mut received_updates = 0;
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 cancel_token.cancel();
                 break
             },
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                println!("Odebrane pasma FFT: {:?}", rx.borrow_and_update());
+            _ = rx.changed() => received_updates += 1,
+            _ = interval.tick() => {
+                println!("updates per second: {}", received_updates);
+                received_updates = 0;
             },
         }
     }
