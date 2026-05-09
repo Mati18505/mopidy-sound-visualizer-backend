@@ -152,8 +152,8 @@ fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: to
 async fn main() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    let (gst_in, gst_out) = tokio::sync::mpsc::channel(128);
-    let (web_in, web_out) = tokio::sync::broadcast::channel(128);
+    let (gst_in, gst_out) = tokio::sync::mpsc::channel(1);
+    let (web_in, web_out) = tokio::sync::broadcast::channel(1);
 
     let stream_handle = stream(gst_in, cancel_token.clone());
     let transformer = transform_data(gst_out, web_in);
@@ -181,6 +181,6 @@ async fn main() {
     }
 
     stream_handle.await.unwrap();
-    transformer.await;
+    transformer.await.unwrap();
     web_server_handle.await.unwrap();
 }
