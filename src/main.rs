@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 
 use axum::{
     Router, extract::State, response::sse::{Event, KeepAlive, Sse}, routing::get
@@ -6,6 +6,10 @@ use axum::{
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
 use tokio_stream::StreamExt;
+
+static GST: AtomicU64 = AtomicU64::new(0);
+static WATCH: AtomicU64 = AtomicU64::new(0);
+static SSE: AtomicU64 = AtomicU64::new(0);
 
 fn stream(
     sender: tokio::sync::watch::Sender<Vec<f32>>,
@@ -61,6 +65,8 @@ fn stream(
                             .map(|v| v.get::<f32>().unwrap())
                             .collect();
                         let _ = sender.send(magnitudes);
+
+                        GST.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 MessageView::Eos(..) => break,
@@ -89,6 +95,7 @@ struct AppState {
 async fn sse_handler(State(state): State<Arc<AppState>>) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let stream = tokio_stream::wrappers::WatchStream::new(state.rx.clone())
         .map(|data| {
+            SSE.fetch_add(1, Ordering::Relaxed);
             Ok(Event::default().json_data(data).unwrap())
         });
 
@@ -117,7 +124,6 @@ async fn main() {
     let shared_state = Arc::new(AppState{rx: rx.clone()});
     let web_server_handle = serve_web(shared_state, cancel_token.clone());
 
-    let mut received_updates = 0;
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
     loop {
@@ -126,10 +132,16 @@ async fn main() {
                 cancel_token.cancel();
                 break
             },
-            _ = rx.changed() => received_updates += 1,
+            _ = rx.changed() => {
+                WATCH.fetch_add(1, Ordering::Relaxed);
+            },
             _ = interval.tick() => {
-                println!("updates per second: {}", received_updates);
-                received_updates = 0;
+                println!(
+                    "gst: {}/s, watch: {}/s, sse: {}/s",
+                    GST.swap(0, Ordering::Relaxed),
+                    WATCH.swap(0, Ordering::Relaxed),
+                    SSE.swap(0, Ordering::Relaxed),
+                );
             },
         }
     }
