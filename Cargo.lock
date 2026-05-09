@@ -538,6 +538,7 @@ dependencies = [
  "futures-util",
  "gstreamer",
  "gstreamer-app",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tokio-util",
