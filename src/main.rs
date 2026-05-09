@@ -17,7 +17,7 @@ fn stream(
         let pipeline_str = "
             udpsrc port=5555 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
             queue ! audioconvert ! audioresample !
-            spectrum name=spec bands=64 ! fakesink
+            spectrum name=spec interval=10000000 bands=64 ! fakesink
         ";
 
         let pipeline = gst::parse::launch(pipeline_str).expect("pipeline creation failed");
