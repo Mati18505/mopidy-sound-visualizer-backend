@@ -17,6 +17,9 @@ use gstreamer::{self as gst};
 use serde_json::json;
 use tokio_stream::StreamExt;
 
+mod log_partition;
+mod ffi_spectrum;
+
 static GST: AtomicU64 = AtomicU64::new(0);
 static TRANSFORMATIONS: AtomicU64 = AtomicU64::new(0);
 static SSE: AtomicU64 = AtomicU64::new(0);
@@ -31,7 +34,7 @@ fn stream(
         let pipeline_str = "
             udpsrc port=5555 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
             queue ! audioconvert ! audioresample !
-            spectrum name=spec interval=10000000 bands=64 ! fakesink
+            spectrum name=spec interval=10000000 bands=4096 ! fakesink
         ";
 
         let pipeline = gst::parse::launch(pipeline_str).expect("pipeline creation failed");
@@ -142,10 +145,55 @@ fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: to
     tokio::spawn(async move {
         while let Some(data) = gst_in.recv().await {
             TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
+            let data: Vec<f32> = data.iter().map(|amp| *amp + 60.0).collect();
+            let data: Vec<f32> = transform_ffi_to_log_scale(data);
             let text = json!(data).to_string();
             let _ = str_out.send(Arc::new(text));
         };
     })
+}
+
+#[derive(Default, Clone, Copy)]
+struct LogBandAggregator {
+    sum_ffi_amplitudes: f32,
+    ffi_bands_count: u32,
+}
+
+impl LogBandAggregator {
+    fn add_ffi_band(&mut self, amplitude: f32) {
+        self.sum_ffi_amplitudes += amplitude;
+        self.ffi_bands_count += 1;
+    }
+
+    fn get_avg(&self) -> f32 {
+        self.sum_ffi_amplitudes / self.ffi_bands_count as f32
+    }
+}
+
+fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<f32> {
+    let sampling_rate: u32 = 44100;
+    let bands_count: u32 = ffi_bands.len() as u32;
+    let log_partition_bands: u32 = 100;
+
+    let bw = ffi_spectrum::band_width(sampling_rate, bands_count);
+    let log_freq_ranges = log_partition::create_freq_tuples(log_partition_bands);
+    let mut log_band_aggregators: Vec<LogBandAggregator> = vec![Default::default(); log_freq_ranges.len()];
+
+    for (ffi_band_n, ffi_band_amplitude) in ffi_bands.iter().enumerate() {
+        let ffi_band_freq =
+            ffi_spectrum::get_freq_for_band_n(bw, ffi_band_n as u32);
+        let log_band_index = log_partition::get_tuple_index_containing_freq(
+            &log_freq_ranges,
+            ffi_band_freq,
+        );
+        //dbg!(&log_band_index, &ffi_band_n);
+
+        if let Some(log_band_index) = log_band_index {
+            log_band_aggregators[log_band_index].add_ffi_band(*ffi_band_amplitude);
+        }
+    }
+
+    log_band_aggregators.iter().map(|log_band_aggregator| log_band_aggregator.get_avg()).collect()
 }
 
 #[tokio::main]
