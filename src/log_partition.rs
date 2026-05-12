@@ -6,11 +6,15 @@ pub fn create_freq_tuples(len: u32) -> Vec<(u32, u32)> {
 }
 
 pub fn get_tuple_containing_freq(tuple_list: &[(u32, u32)], freq: u32) -> Option<(u32, u32)> {
-    tuple_list.iter().find(|(start_freq, end_freq)| (start_freq..=end_freq).contains(&&freq)).copied()
+    tuple_list.iter().find(|freq_range| freq_in_range(**freq_range, freq)).copied()
 }
 
 pub fn get_tuple_index_containing_freq(tuple_list: &[(u32, u32)], freq: u32) -> Option<usize> {
-    tuple_list.iter().position(|(start_freq, end_freq)| (start_freq..=end_freq).contains(&&freq))
+    tuple_list.iter().position(|freq_range| freq_in_range(*freq_range, freq))
+}
+
+pub fn freq_in_range(tuple: (u32, u32), freq: u32) -> bool {
+    (tuple.0..=tuple.1).contains(&freq)
 }
 
 fn create_freq_arr(len: u32) -> Vec<u32> {

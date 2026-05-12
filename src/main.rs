@@ -170,26 +170,32 @@ impl LogBandAggregator {
     }
 }
 
+// Use two pointers technique to optimize to O(ffi_bands).
+// This assumes that ffi_band_freq(n+1) > ffi_band_freq(n)
 fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<f32> {
     let sampling_rate: u32 = 44100;
-    let bands_count: u32 = ffi_bands.len() as u32;
-    let log_partition_bands: u32 = 100;
+    let ffi_bands_count: usize = ffi_bands.len();
+    let log_bands_count: usize = 100;
 
-    let bw = ffi_spectrum::band_width(sampling_rate, bands_count);
-    let log_freq_ranges = log_partition::create_freq_tuples(log_partition_bands);
+    let bw = ffi_spectrum::band_width(sampling_rate, ffi_bands_count as u32);
+    let log_freq_ranges = log_partition::create_freq_tuples(log_bands_count as u32);
+
     let mut log_band_aggregators: Vec<LogBandAggregator> = vec![Default::default(); log_freq_ranges.len()];
+    let mut ffi_idx: usize = 0;
+    let mut log_idx: usize = 0;
 
-    for (ffi_band_n, ffi_band_amplitude) in ffi_bands.iter().enumerate() {
+    while ffi_idx < ffi_bands_count && log_idx < log_bands_count {
         let ffi_band_freq =
-            ffi_spectrum::get_freq_for_band_n(bw, ffi_band_n as u32);
-        let log_band_index = log_partition::get_tuple_index_containing_freq(
-            &log_freq_ranges,
-            ffi_band_freq,
-        );
-        //dbg!(&log_band_index, &ffi_band_n);
+            ffi_spectrum::get_freq_for_band_n(bw, ffi_idx as u32);
+        let curr_log_freq_range = log_freq_ranges[log_idx];
 
-        if let Some(log_band_index) = log_band_index {
-            log_band_aggregators[log_band_index].add_ffi_band(*ffi_band_amplitude);
+        if log_partition::freq_in_range(curr_log_freq_range, ffi_band_freq) {
+            log_band_aggregators[log_idx].add_ffi_band(ffi_bands[ffi_idx]);
+            ffi_idx += 1;
+        } else if ffi_band_freq < curr_log_freq_range.0 {
+            ffi_idx += 1;
+        } else {
+            log_idx += 1;
         }
     }
 
