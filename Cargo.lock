@@ -481,6 +481,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lerp"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecc56a024593ecbcacb6bb4f8f4ace719eb08ae9b701535640ef3efb0e706260"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -538,6 +547,7 @@ dependencies = [
  "futures-util",
  "gstreamer",
  "gstreamer-app",
+ "lerp",
  "serde_json",
  "tokio",
  "tokio-stream",

@@ -14,6 +14,7 @@ use axum::{
 };
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
+use lerp::Lerp;
 use serde_json::json;
 use tokio_stream::StreamExt;
 
@@ -32,7 +33,7 @@ fn stream(
         gst::init().expect("initialization failed");
 
         let pipeline_str = "
-            udpsrc port=5555 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
+            udpsrc port=5556 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
             queue ! audioconvert ! audioresample !
             spectrum name=spec interval=10000000 bands=4096 ! fakesink
         ";
@@ -146,11 +147,51 @@ fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: to
         while let Some(data) = gst_in.recv().await {
             TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
             let data: Vec<f32> = data.iter().map(|amp| *amp + 60.0).collect();
-            let data: Vec<f32> = transform_ffi_to_log_scale(data);
+            let data: Vec<Option<f32>> = transform_ffi_to_log_scale(data);
+            let data = interpolate_empty(data);
             let text = json!(data).to_string();
             let _ = str_out.send(Arc::new(text));
         };
     })
+}
+
+fn none_to_zero(data: Vec<Option<f32>>) -> Vec<f32>  {
+    data.iter().map(|band| band.unwrap_or_default()).collect()
+}
+
+// For each None band search for its nearest Some bands into left and right. 
+// Interpolate with them.
+// i = x, band.val = y
+fn interpolate_empty(data: Vec<Option<f32>>) -> Vec<f32> {
+    let mut nearest_left: Option<(usize, f32)> = None;
+
+    data.iter().enumerate().map(|(i, band)| {
+        match band {
+            Some(band) => {
+                nearest_left = Some((i, *band));
+                *band
+            },
+            None => {
+                let nearest_right: Option<(usize, f32)> = data[i+1..data.len()].iter().position(|e| e.is_some()).map(|idx| (i+1+idx, data.get(i+1+idx).unwrap().unwrap()));
+
+                match (nearest_left, nearest_right) {
+                    (None, None) => 0.0,
+                    (None, Some(rv)) => rv.1,
+                    (Some(lv), None) => lv.1,
+                    (Some(lv), Some(rv)) => {
+                        let li = lv.0 as f32;
+                        let ri = rv.0 as f32;
+                        let i  = i as f32;
+
+                        let t = (i - li) / (ri - li);
+
+                        debug_assert!((0.0..=1.0).contains(&t));
+                        lv.1.lerp(rv.1, t)
+                    },
+                }
+            },
+        }
+    }).collect()
 }
 
 #[derive(Default, Clone, Copy)]
@@ -165,14 +206,18 @@ impl LogBandAggregator {
         self.ffi_bands_count += 1;
     }
 
-    fn get_avg(&self) -> f32 {
-        self.sum_ffi_amplitudes / self.ffi_bands_count as f32
+    fn get_avg(&self) -> Option<f32> {
+        if self.ffi_bands_count > 0 {
+            Some(self.sum_ffi_amplitudes / self.ffi_bands_count as f32)
+        } else {
+            None
+        }
     }
 }
 
 // Use two pointers technique to optimize to O(ffi_bands).
 // This assumes that ffi_band_freq(n+1) > ffi_band_freq(n)
-fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<f32> {
+fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<Option<f32>> {
     let sampling_rate: u32 = 44100;
     let ffi_bands_count: usize = ffi_bands.len();
     let log_bands_count: usize = 100;
