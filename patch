@@ -1,0 +1,108 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 9db13ab..80e1068 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -547,6 +547,7 @@ dependencies = [
+  "gstreamer",
+  "gstreamer-app",
+  "lerp",
++ "serde",
+  "serde_json",
+  "tokio",
+  "tokio-stream",
+@@ -696,6 +697,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+ dependencies = [
+  "serde_core",
++ "serde_derive",
+ ]
+ 
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index 2aa3ad8..00d7564 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -9,6 +9,7 @@ futures-util = "0.3.32"
+ gstreamer = "0.25.2"
+ gstreamer-app = "0.25.2"
+ lerp = "0.5.0"
++serde = { version = "1.0.228", features = ["derive"] }
+ serde_json = "1.0.149"
+ tokio = { version = "1.52.1", features = ["full"] }
+ tokio-stream = { version = "0.1.18", features = ["sync"] }
+diff --git a/src/main.rs b/src/main.rs
+index a82407e..50e38a4 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,9 +1,8 @@
+ use std::{
+-    convert::Infallible,
+-    sync::{
++    convert::Infallible, ops::Deref, sync::{
+         Arc,
+         atomic::{AtomicU64, Ordering},
+-    },
++    }, time::SystemTime
+ };
+ 
+ use axum::{
+@@ -15,6 +14,7 @@ use axum::{
+ use gstreamer::prelude::*;
+ use gstreamer::{self as gst};
+ use lerp::Lerp;
++use serde::{Deserialize, Serialize};
+ use serde_json::json;
+ use tokio_stream::StreamExt;
+ 
+@@ -103,7 +103,13 @@ fn stream(
+ }
+ 
+ struct AppState {
+-    rx: tokio::sync::broadcast::Receiver<Arc<String>>,
++    rx: tokio::sync::broadcast::Receiver<Arc<Vec<f32>>>,
++}
++
++#[derive(Serialize)]
++struct SseMessage {
++    data: Vec<f32>,
++    timestamp: u128,
+ }
+ 
+ async fn sse_handler(
+@@ -111,12 +117,16 @@ async fn sse_handler(
+ ) -> Sse<impl futures_util::Stream<Item = Result<sse::Event, Infallible>>> {
+ let stream = tokio_stream::wrappers::BroadcastStream::new(state.rx.resubscribe())
+     .filter_map(|data| {
+-        let text = data.ok()?;
++        let data = data.ok()?.deref().clone();
++        let message = SseMessage {
++            data,
++            timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis()
++        };
+ 
+         SSE.fetch_add(1, Ordering::Relaxed);
+ 
+         Some(Ok::<_, Infallible>(
+-            sse::Event::default().data(text.to_string()),
++            sse::Event::default().data(json!(message).to_string()),
+         ))
+     });
+ 
+@@ -142,15 +152,14 @@ fn serve_web(
+     })
+ }
+ 
+-fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: tokio::sync::broadcast::Sender<Arc<String>>) -> tokio::task::JoinHandle<()>  {
++fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: tokio::sync::broadcast::Sender<Arc<Vec<f32>>>) -> tokio::task::JoinHandle<()>  {
+     tokio::spawn(async move {
+         while let Some(data) = gst_in.recv().await {
+             TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
+             let data: Vec<f32> = data.iter().map(|amp| *amp + 60.0).collect();
+             let data: Vec<Option<f32>> = transform_ffi_to_log_scale(data);
+             let data = interpolate_empty(data);
+-            let text = json!(data).to_string();
+-            let _ = str_out.send(Arc::new(text));
++            let _ = str_out.send(Arc::new(data));
+         };
+     })
+ }

@@ -1,9 +1,8 @@
 use std::{
-    convert::Infallible,
-    sync::{
+    convert::Infallible, ops::Deref, sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-    },
+    }, time::SystemTime
 };
 
 use axum::{
@@ -15,6 +14,7 @@ use axum::{
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
 use lerp::Lerp;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::StreamExt;
 
@@ -103,7 +103,7 @@ fn stream(
 }
 
 struct AppState {
-    rx: tokio::sync::broadcast::Receiver<Arc<String>>,
+    rx: tokio::sync::broadcast::Receiver<Arc<Vec<f32>>>,
 }
 
 async fn sse_handler(
@@ -111,12 +111,23 @@ async fn sse_handler(
 ) -> Sse<impl futures_util::Stream<Item = Result<sse::Event, Infallible>>> {
 let stream = tokio_stream::wrappers::BroadcastStream::new(state.rx.resubscribe())
     .filter_map(|data| {
-        let text = data.ok()?;
+
+        #[derive(Serialize)]
+        struct SseMessage {
+            data: Vec<f32>,
+            timestamp: u128,
+        }
+
+        let data = data.ok()?.deref().clone();
+        let message = SseMessage {
+            data,
+            timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis()
+        };
 
         SSE.fetch_add(1, Ordering::Relaxed);
 
         Some(Ok::<_, Infallible>(
-            sse::Event::default().data(text.to_string()),
+            sse::Event::default().data(json!(message).to_string()),
         ))
     });
 
@@ -142,15 +153,14 @@ fn serve_web(
     })
 }
 
-fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: tokio::sync::broadcast::Sender<Arc<String>>) -> tokio::task::JoinHandle<()>  {
+fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: tokio::sync::broadcast::Sender<Arc<Vec<f32>>>) -> tokio::task::JoinHandle<()>  {
     tokio::spawn(async move {
         while let Some(data) = gst_in.recv().await {
             TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
             let data: Vec<f32> = data.iter().map(|amp| *amp + 60.0).collect();
             let data: Vec<Option<f32>> = transform_ffi_to_log_scale(data);
             let data = interpolate_empty(data);
-            let text = json!(data).to_string();
-            let _ = str_out.send(Arc::new(text));
+            let _ = str_out.send(Arc::new(data));
         };
     })
 }
