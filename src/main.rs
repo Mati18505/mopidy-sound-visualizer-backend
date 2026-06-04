@@ -1,8 +1,11 @@
 use std::{
-    convert::Infallible, ops::Deref, sync::{
+    convert::Infallible,
+    ops::Deref,
+    sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-    }, time::SystemTime
+    },
+    time::SystemTime,
 };
 
 use axum::{
@@ -18,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::StreamExt;
 
-mod log_partition;
 mod ffi_spectrum;
+mod log_partition;
 
 static GST: AtomicU64 = AtomicU64::new(0);
 static TRANSFORMATIONS: AtomicU64 = AtomicU64::new(0);
@@ -109,27 +112,29 @@ struct AppState {
 async fn sse_handler(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<sse::Event, Infallible>>> {
-let stream = tokio_stream::wrappers::BroadcastStream::new(state.rx.resubscribe())
-    .filter_map(|data| {
+    let stream =
+        tokio_stream::wrappers::BroadcastStream::new(state.rx.resubscribe()).filter_map(|data| {
+            #[derive(Serialize)]
+            struct SseMessage {
+                data: Vec<f32>,
+                timestamp: u128,
+            }
 
-        #[derive(Serialize)]
-        struct SseMessage {
-            data: Vec<f32>,
-            timestamp: u128,
-        }
+            let data = data.ok()?.deref().clone();
+            let message = SseMessage {
+                data,
+                timestamp: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            };
 
-        let data = data.ok()?.deref().clone();
-        let message = SseMessage {
-            data,
-            timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis()
-        };
+            SSE.fetch_add(1, Ordering::Relaxed);
 
-        SSE.fetch_add(1, Ordering::Relaxed);
-
-        Some(Ok::<_, Infallible>(
-            sse::Event::default().data(json!(message).to_string()),
-        ))
-    });
+            Some(Ok::<_, Infallible>(
+                sse::Event::default().data(json!(message).to_string()),
+            ))
+        });
 
     Sse::new(stream).keep_alive(sse::KeepAlive::default())
 }
@@ -153,7 +158,10 @@ fn serve_web(
     })
 }
 
-fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: tokio::sync::broadcast::Sender<Arc<Vec<f32>>>) -> tokio::task::JoinHandle<()>  {
+fn transform_data(
+    mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>,
+    str_out: tokio::sync::broadcast::Sender<Arc<Vec<f32>>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(data) = gst_in.recv().await {
             TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
@@ -161,28 +169,32 @@ fn transform_data(mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>, str_out: to
             let data: Vec<Option<f32>> = transform_ffi_to_log_scale(data);
             let data = interpolate_empty(data);
             let _ = str_out.send(Arc::new(data));
-        };
+        }
     })
 }
 
-fn none_to_zero(data: Vec<Option<f32>>) -> Vec<f32>  {
+fn none_to_zero(data: Vec<Option<f32>>) -> Vec<f32> {
     data.iter().map(|band| band.unwrap_or_default()).collect()
 }
 
-// For each None band search for its nearest Some bands into left and right. 
+// For each None band search for its nearest Some bands into left and right.
 // Interpolate with them.
 // i = x, band.val = y
 fn interpolate_empty(data: Vec<Option<f32>>) -> Vec<f32> {
     let mut nearest_left: Option<(usize, f32)> = None;
 
-    data.iter().enumerate().map(|(i, band)| {
-        match band {
+    data.iter()
+        .enumerate()
+        .map(|(i, band)| match band {
             Some(band) => {
                 nearest_left = Some((i, *band));
                 *band
-            },
+            }
             None => {
-                let nearest_right: Option<(usize, f32)> = data[i+1..data.len()].iter().position(|e| e.is_some()).map(|idx| (i+1+idx, data.get(i+1+idx).unwrap().unwrap()));
+                let nearest_right: Option<(usize, f32)> = data[i + 1..data.len()]
+                    .iter()
+                    .position(|e| e.is_some())
+                    .map(|idx| (i + 1 + idx, data.get(i + 1 + idx).unwrap().unwrap()));
 
                 match (nearest_left, nearest_right) {
                     (None, None) => 0.0,
@@ -191,17 +203,17 @@ fn interpolate_empty(data: Vec<Option<f32>>) -> Vec<f32> {
                     (Some(lv), Some(rv)) => {
                         let li = lv.0 as f32;
                         let ri = rv.0 as f32;
-                        let i  = i as f32;
+                        let i = i as f32;
 
                         let t = (i - li) / (ri - li);
 
                         debug_assert!((0.0..=1.0).contains(&t));
                         lv.1.lerp(rv.1, t)
-                    },
+                    }
                 }
-            },
-        }
-    }).collect()
+            }
+        })
+        .collect()
 }
 
 #[derive(Default, Clone, Copy)]
@@ -235,13 +247,13 @@ fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<Option<f32>> {
     let bw = ffi_spectrum::band_width(sampling_rate, ffi_bands_count as u32);
     let log_freq_ranges = log_partition::create_freq_tuples(log_bands_count as u32);
 
-    let mut log_band_aggregators: Vec<LogBandAggregator> = vec![Default::default(); log_freq_ranges.len()];
+    let mut log_band_aggregators: Vec<LogBandAggregator> =
+        vec![Default::default(); log_freq_ranges.len()];
     let mut ffi_idx: usize = 0;
     let mut log_idx: usize = 0;
 
     while ffi_idx < ffi_bands_count && log_idx < log_bands_count {
-        let ffi_band_freq =
-            ffi_spectrum::get_freq_for_band_n(bw, ffi_idx as u32);
+        let ffi_band_freq = ffi_spectrum::get_freq_for_band_n(bw, ffi_idx as u32);
         let curr_log_freq_range = log_freq_ranges[log_idx];
 
         if log_partition::freq_in_range(curr_log_freq_range, ffi_band_freq) {
@@ -254,7 +266,10 @@ fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<Option<f32>> {
         }
     }
 
-    log_band_aggregators.iter().map(|log_band_aggregator| log_band_aggregator.get_avg()).collect()
+    log_band_aggregators
+        .iter()
+        .map(|log_band_aggregator| log_band_aggregator.get_avg())
+        .collect()
 }
 
 #[tokio::main]

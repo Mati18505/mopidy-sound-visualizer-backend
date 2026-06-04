@@ -32,10 +32,7 @@ mod test {
             (bands_count / 2, sampling_rate / 4),
         ]);
 
-        assert_eq!(
-            band_width(sampling_rate, bands_count),
-            expected_width
-        );
+        assert_eq!(band_width(sampling_rate, bands_count), expected_width);
 
         for (band, expected) in cases {
             let bw = band_width(sampling_rate, bands_count);
