@@ -17,7 +17,7 @@ use axum::{
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
 use lerp::Lerp;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tokio_stream::StreamExt;
 
@@ -27,6 +27,9 @@ mod log_partition;
 static GST: AtomicU64 = AtomicU64::new(0);
 static TRANSFORMATIONS: AtomicU64 = AtomicU64::new(0);
 static SSE: AtomicU64 = AtomicU64::new(0);
+const SAMPLING_RATE: u32 = 96000;
+const GST_PORT: u16 = 5556;
+const DB_THRESHOLD: u8 = 100;
 
 fn stream(
     sender: tokio::sync::mpsc::Sender<Vec<f32>>,
@@ -35,16 +38,15 @@ fn stream(
     tokio::task::spawn_blocking(move || {
         gst::init().expect("initialization failed");
 
-        let pipeline_str = "
-            udpsrc port=5556 caps=\"audio/x-raw,rate=44100,channels=2,format=S16LE\" !
-            queue ! audioconvert ! audioresample !
-            spectrum name=spec interval=10000000 bands=4096 ! fakesink
-            udpsrc port=5556 caps=\"audio/x-raw,rate=96000,channels=1,format=S16LE\" !
-            queue ! 
-            spectrum name=spec interval=500000 bands=4096 ! fakesink
-        ";
+        let pipeline_str = 
+            format!("
+            udpsrc port={GST_PORT} caps=\"audio/x-raw,rate={SAMPLING_RATE},channels=1,format=S16LE\" !
+            queue !
+            spectrum name=spec interval=500000 bands=4096 threshold=-{DB_THRESHOLD} ! fakesink
+            ")
+        ;
 
-        let pipeline = gst::parse::launch(pipeline_str).expect("pipeline creation failed");
+        let pipeline = gst::parse::launch(pipeline_str.as_str()).expect("pipeline creation failed");
 
         pipeline
             .set_state(gst::State::Playing)
@@ -168,7 +170,7 @@ fn transform_data(
     tokio::spawn(async move {
         while let Some(data) = gst_in.recv().await {
             TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
-            let data: Vec<f32> = data.iter().map(|amp| *amp + 60.0).collect();
+            let data: Vec<f32> = data.iter().map(|amp| *amp + DB_THRESHOLD as f32).collect();
             let data: Vec<Option<f32>> = transform_ffi_to_log_scale(data);
             let data = interpolate_empty(data);
             let _ = str_out.send(Arc::new(data));
@@ -243,11 +245,10 @@ impl LogBandAggregator {
 // Use two pointers technique to optimize to O(ffi_bands).
 // This assumes that ffi_band_freq(n+1) > ffi_band_freq(n)
 fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<Option<f32>> {
-    let sampling_rate: u32 = 44100;
     let ffi_bands_count: usize = ffi_bands.len();
     let log_bands_count: usize = 100;
 
-    let bw = ffi_spectrum::band_width(sampling_rate, ffi_bands_count as u32);
+    let bw = ffi_spectrum::band_width(SAMPLING_RATE, ffi_bands_count as u32);
     let log_freq_ranges = log_partition::create_freq_tuples(log_bands_count as u32);
 
     let mut log_band_aggregators: Vec<LogBandAggregator> =
