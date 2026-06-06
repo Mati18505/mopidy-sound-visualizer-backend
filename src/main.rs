@@ -259,12 +259,28 @@ impl BuildInfo {
     }
 }
 
+#[derive(valuable::Valuable)]
+struct InstanceInfo {
+    os_release: String,
+    os_type: String,
+}
+impl InstanceInfo {
+    fn new() -> Self {
+        InstanceInfo {
+            os_release: sys_info::os_release().unwrap(),
+            os_type: sys_info::os_type().unwrap(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _logging_guard = init_logging();
-    let build_info = BuildInfo::new();
-    let span_build_info = info_span!("build_info", build_info = build_info.as_value());
+
+    let span_build_info = info_span!("build_info", build_info = BuildInfo::new().as_value());
+    let span_instance_info = info_span!("instance_info", instance_info = InstanceInfo::new().as_value());
     let _enter_build_info = span_build_info.enter();
+    let _enter_instance_info = span_instance_info.enter();
 
     run().await;
 }
