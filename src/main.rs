@@ -32,9 +32,10 @@ static SSE: AtomicU64 = AtomicU64::new(0);
 const SAMPLING_RATE: u32 = 96000;
 const GST_PORT: u16 = 5556;
 const DB_THRESHOLD: u8 = 100;
+const EV_PER_SECOND: u64 = 100;
 
 fn stream(
-    sender: tokio::sync::mpsc::Sender<Vec<f32>>,
+    sender: tokio::sync::watch::Sender<Vec<f32>>,
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
@@ -88,7 +89,7 @@ fn stream(
                             .iter()
                             .map(|v| v.get::<f32>().unwrap())
                             .collect();
-                        let _ = sender.blocking_send(magnitudes);
+                        let _ = sender.send_replace(magnitudes);
 
                         GST.fetch_add(1, Ordering::Relaxed);
                     }
@@ -173,20 +174,31 @@ fn serve_web(
 }
 
 fn transform_data(
-    mut gst_in: tokio::sync::mpsc::Receiver<Vec<f32>>,
+    mut gst_in: tokio::sync::watch::Receiver<Vec<f32>>,
     str_out: tokio::sync::broadcast::Sender<Arc<Vec<f32>>>,
+    cancel_token: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(bands) = gst_in.recv().await {
-            TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_millis(1000 / EV_PER_SECOND));
 
-            let config = bands_transformation::Config {
-                db_threshold: -(DB_THRESHOLD as f32),
-                sampling_rate: SAMPLING_RATE,
-            };
-            let bands: Vec<f32> = bands_transformation::transform_bands(bands, config);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let bands = gst_in.borrow_and_update().clone();
 
-            let _ = str_out.send(Arc::new(bands));
+
+                    let config = bands_transformation::Config {
+                        db_threshold: -(DB_THRESHOLD as f32),
+                        sampling_rate: SAMPLING_RATE,
+                    };
+                    let bands: Vec<f32> = bands_transformation::transform_bands(bands, config);
+
+                    let _ = str_out.send(Arc::new(bands));
+                    TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
+                },
+                _ = cancel_token.cancelled() => break,
+            }
         }
     })
 }
@@ -211,11 +223,11 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 async fn run() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    let (gst_in, gst_out) = tokio::sync::mpsc::channel(1);
+    let (gst_in, gst_out) = tokio::sync::watch::channel(vec![0.0]);
     let (web_in, web_out) = tokio::sync::broadcast::channel(1);
 
     let stream_handle = stream(gst_in, cancel_token.clone());
-    let transformer = transform_data(gst_out, web_in);
+    let transformer = transform_data(gst_out, web_in, cancel_token.clone());
 
     let shared_state = Arc::new(AppState { rx: web_out });
     let web_server_handle = serve_web(shared_state, cancel_token.clone());
@@ -278,7 +290,10 @@ async fn main() {
     let _logging_guard = init_logging();
 
     let span_build_info = info_span!("build_info", build_info = BuildInfo::new().as_value());
-    let span_instance_info = info_span!("instance_info", instance_info = InstanceInfo::new().as_value());
+    let span_instance_info = info_span!(
+        "instance_info",
+        instance_info = InstanceInfo::new().as_value()
+    );
     let _enter_build_info = span_build_info.enter();
     let _enter_instance_info = span_instance_info.enter();
 
