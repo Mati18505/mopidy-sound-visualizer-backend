@@ -185,17 +185,18 @@ fn transform_data(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let bands = gst_in.borrow_and_update().clone();
+                    if gst_in.has_changed().unwrap() {
+                        let bands = gst_in.borrow_and_update().clone();
 
+                        let config = bands_transformation::Config {
+                            db_threshold: -(DB_THRESHOLD as f32),
+                            sampling_rate: SAMPLING_RATE,
+                        };
+                        let bands: Vec<f32> = bands_transformation::transform_bands(bands, config);
 
-                    let config = bands_transformation::Config {
-                        db_threshold: -(DB_THRESHOLD as f32),
-                        sampling_rate: SAMPLING_RATE,
-                    };
-                    let bands: Vec<f32> = bands_transformation::transform_bands(bands, config);
-
-                    let _ = str_out.send(Arc::new(bands));
-                    TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
+                        let _ = str_out.send(Arc::new(bands));
+                        TRANSFORMATIONS.fetch_add(1, Ordering::Relaxed);
+                    }
                 },
                 _ = cancel_token.cancelled() => break,
             }
