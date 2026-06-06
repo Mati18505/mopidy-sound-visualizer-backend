@@ -20,6 +20,8 @@ use lerp::Lerp;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::StreamExt;
+use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
+use tracing_subscriber::EnvFilter;
 
 mod ffi_spectrum;
 mod log_partition;
@@ -38,13 +40,11 @@ fn stream(
     tokio::task::spawn_blocking(move || {
         gst::init().expect("initialization failed");
 
-        let pipeline_str = 
-            format!("
+        let pipeline_str = format!("
             udpsrc port={GST_PORT} caps=\"audio/x-raw,rate={SAMPLING_RATE},channels=1,format=S16LE\" !
             queue !
             spectrum name=spec interval=500000 bands=4096 threshold=-{DB_THRESHOLD} ! fakesink
-            ")
-        ;
+            ");
 
         let pipeline = gst::parse::launch(pipeline_str.as_str()).expect("pipeline creation failed");
 
@@ -53,6 +53,8 @@ fn stream(
             .expect("unable to set the pipeline to the `Playing` state");
 
         let bus = pipeline.bus().unwrap();
+
+        info!(port = GST_PORT, "gstreamer started listening");
 
         loop {
             if cancel_token.is_cancelled() {
@@ -93,7 +95,7 @@ fn stream(
                 }
                 MessageView::Eos(..) => break,
                 MessageView::Error(err) => {
-                    println!(
+                    error!(
                         "Error from {:?}: {} ({:?})",
                         err.src().map(|s| s.path_string()),
                         err.error(),
@@ -104,9 +106,12 @@ fn stream(
                 _ => (),
             }
         }
+
         pipeline
             .set_state(gst::State::Null)
             .expect("Unable to set the pipeline to the `Null` state");
+
+        info!(port = GST_PORT, "gstreamer finished listening");
     })
 }
 
@@ -154,12 +159,16 @@ fn serve_web(
         .with_state(shared_state);
 
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+        let addr = "0.0.0.0:3000";
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+
+        info!(addr = addr, "sse started listening");
 
         tokio::select! {
             _ = axum::serve(listener, app) => (),
             _ = cancel_token.cancelled() => (),
         }
+        info!(addr = addr, "sse finished listening");
     })
 }
 
@@ -276,8 +285,26 @@ fn transform_ffi_to_log_scale(ffi_bands: Vec<f32>) -> Vec<Option<f32>> {
         .collect()
 }
 
+fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
+    let (non_blocking, guard) = tracing_appender::non_blocking(std::io::stderr());
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    let format = tracing_subscriber::fmt::format().compact();
+
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_env_filter(filter)
+        .event_format(format)
+        .init();
+
+    guard
+}
+
 #[tokio::main]
 async fn main() {
+    let _logging_guard = init_logging();
+
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let (gst_in, gst_out) = tokio::sync::mpsc::channel(1);
@@ -298,11 +325,10 @@ async fn main() {
                 break
             },
             _ = interval.tick() => {
-                println!(
-                    "gst: {}/s, transformations: {}/s, sse: {}/s",
-                    GST.swap(0, Ordering::Relaxed),
-                    TRANSFORMATIONS.swap(0, Ordering::Relaxed),
-                    SSE.swap(0, Ordering::Relaxed),
+                debug!(
+                    gst = GST.swap(0, Ordering::Relaxed),
+                    transformations = TRANSFORMATIONS.swap(0, Ordering::Relaxed),
+                    sse = SSE.swap(0, Ordering::Relaxed),
                 );
             },
         }
