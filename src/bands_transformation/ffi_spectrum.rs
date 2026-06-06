@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 pub fn band_width(sampling_rate: u32, bands_count: u32) -> f32 {
     assert!(sampling_rate > 0);
     assert!(bands_count > 0);
@@ -16,6 +14,7 @@ pub fn get_freq_for_band_n(band_width: f32, n: u32) -> u32 {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_ffi_spectrum() {

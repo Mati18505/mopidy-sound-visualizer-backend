@@ -1,4 +1,4 @@
-use mopidy_sound_visualizer::{ffi_spectrum, log_partition};
+use mopidy_sound_visualizer::bands_transformation::{ffi_spectrum, log_partition};
 
 #[test]
 fn ffi_spectrum_log_partition_integration() {

@@ -1,2 +1,1 @@
-pub mod ffi_spectrum;
-pub mod log_partition;
+pub mod bands_transformation;
