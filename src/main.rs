@@ -221,41 +221,6 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
     guard
 }
 
-async fn run() {
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-
-    let (gst_in, gst_out) = tokio::sync::watch::channel(vec![0.0]);
-    let (web_in, web_out) = tokio::sync::broadcast::channel(1);
-
-    let stream_handle = stream(gst_in, cancel_token.clone());
-    let transformer = transform_data(gst_out, web_in, cancel_token.clone());
-
-    let shared_state = Arc::new(AppState { rx: web_out });
-    let web_server_handle = serve_web(shared_state, cancel_token.clone());
-
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                cancel_token.cancel();
-                break
-            },
-            _ = interval.tick() => {
-                debug!(
-                    gst = GST.swap(0, Ordering::Relaxed),
-                    transformations = TRANSFORMATIONS.swap(0, Ordering::Relaxed),
-                    sse = SSE.swap(0, Ordering::Relaxed),
-                );
-            },
-        }
-    }
-
-    stream_handle.await.unwrap();
-    transformer.await.unwrap();
-    web_server_handle.await.unwrap();
-}
-
 #[derive(valuable::Valuable)]
 struct BuildInfo {
     git_sha: String,
@@ -290,13 +255,39 @@ impl InstanceInfo {
 async fn main() {
     let _logging_guard = init_logging();
 
-    let span_build_info = info_span!("build_info", build_info = BuildInfo::new().as_value());
-    let span_instance_info = info_span!(
-        "instance_info",
-        instance_info = InstanceInfo::new().as_value()
-    );
-    let _enter_build_info = span_build_info.enter();
-    let _enter_instance_info = span_instance_info.enter();
+    info!(build_info = BuildInfo::new().as_value());
+    info!(instance_info = InstanceInfo::new().as_value(),);
 
-    run().await;
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let (gst_in, gst_out) = tokio::sync::watch::channel(vec![0.0]);
+    let (web_in, web_out) = tokio::sync::broadcast::channel(1);
+
+    let stream_handle = stream(gst_in, cancel_token.clone());
+    let transformer = transform_data(gst_out, web_in, cancel_token.clone());
+
+    let shared_state = Arc::new(AppState { rx: web_out });
+    let web_server_handle = serve_web(shared_state, cancel_token.clone());
+
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                cancel_token.cancel();
+                break
+            },
+            _ = interval.tick() => {
+                debug!(
+                    gst = GST.swap(0, Ordering::Relaxed),
+                    transformations = TRANSFORMATIONS.swap(0, Ordering::Relaxed),
+                    sse = SSE.swap(0, Ordering::Relaxed),
+                );
+            },
+        }
+    }
+
+    stream_handle.await.unwrap();
+    transformer.await.unwrap();
+    web_server_handle.await.unwrap();
 }
