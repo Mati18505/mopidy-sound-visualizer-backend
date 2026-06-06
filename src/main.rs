@@ -14,14 +14,16 @@ use axum::{
     response::{Sse, sse},
     routing::get,
 };
+use build_time::build_time_local;
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
 use lerp::Lerp;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{debug, error, info, info_span, level_filters::LevelFilter, trace, warn};
+use valuable::Valuable;
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
 mod ffi_spectrum;
 mod log_partition;
@@ -296,15 +298,13 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
         .with_writer(non_blocking)
         .with_env_filter(filter)
         .event_format(format)
+        .with_span_events(FmtSpan::ENTER)
         .init();
 
     guard
 }
 
-#[tokio::main]
-async fn main() {
-    let _logging_guard = init_logging();
-
+async fn run() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let (gst_in, gst_out) = tokio::sync::mpsc::channel(1);
@@ -337,4 +337,30 @@ async fn main() {
     stream_handle.await.unwrap();
     transformer.await.unwrap();
     web_server_handle.await.unwrap();
+}
+
+#[derive(valuable::Valuable)]
+struct BuildInfo {
+    git_sha: String,
+    pkg_version: String,
+    build_time: String,
+}
+impl BuildInfo {
+    fn new() -> Self {
+        BuildInfo {
+            git_sha: std::env::var("GIT_SHA").unwrap_or("unknown".to_string()),
+            pkg_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_time: build_time_local!("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let _logging_guard = init_logging();
+    let build_info = BuildInfo::new();
+    let span_build_info = info_span!("build_info", build_info=build_info.as_value());
+    let _enter_build_info = span_build_info.enter();
+
+    run().await;
 }

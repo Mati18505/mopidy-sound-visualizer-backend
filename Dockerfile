@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgstreamer1.0
 
 # Build the application.
 RUN --mount=type=bind,source=src,target=src \
+    --mount=type=bind,source=.cargo,target=.cargo \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=cache,target=/app/target/ \
