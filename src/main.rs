@@ -1,5 +1,6 @@
 use std::{
     convert::Infallible,
+    net::SocketAddrV4,
     ops::Deref,
     sync::{
         Arc,
@@ -8,6 +9,7 @@ use std::{
     time::SystemTime,
 };
 
+use anyhow::Context;
 use axum::{
     Router,
     extract::State,
@@ -150,19 +152,24 @@ async fn sse_handler(
     Sse::new(stream).keep_alive(sse::KeepAlive::default())
 }
 
-fn serve_web(
+async fn serve_web(
     shared_state: Arc<AppState>,
     cancel_token: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let app = Router::<Arc<AppState>>::new()
         .route("/sse", get(sse_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(shared_state);
 
-    tokio::spawn(async move {
-        let addr = "0.0.0.0:3000";
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let addr = "0.0.0.0:3000";
+    let socket_addr: SocketAddrV4 = addr
+        .parse()
+        .context(format!("cannot parse sse address {addr}"))?;
+    let listener = tokio::net::TcpListener::bind(socket_addr)
+        .await
+        .context(format!("cannot bind socket {addr}"))?;
 
+    Ok(tokio::spawn(async move {
         info!(addr = addr, "sse started listening");
 
         tokio::select! {
@@ -170,7 +177,7 @@ fn serve_web(
             _ = cancel_token.cancelled() => (),
         }
         info!(addr = addr, "sse finished listening");
-    })
+    }))
 }
 
 fn transform_data(
@@ -267,7 +274,10 @@ async fn main() {
     let transformer = transform_data(gst_out, web_in, cancel_token.clone());
 
     let shared_state = Arc::new(AppState { rx: web_out });
-    let web_server_handle = serve_web(shared_state, cancel_token.clone());
+    let web_server_handle = serve_web(shared_state, cancel_token.clone())
+        .await
+        .context("cannot create sse server")
+        .unwrap();
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
