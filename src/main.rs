@@ -257,8 +257,8 @@ struct InstanceInfo {
 impl InstanceInfo {
     fn new() -> Self {
         InstanceInfo {
-            os_release: sys_info::os_release().unwrap(),
-            os_type: sys_info::os_type().unwrap(),
+            os_release: sys_info::os_release().unwrap_or("unknown".to_string()),
+            os_type: sys_info::os_type().unwrap_or("unknown".to_string()),
         }
     }
 }
@@ -268,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
     let _logging_guard = init_logging();
 
     info!(build_info = BuildInfo::new().as_value());
-    info!(instance_info = InstanceInfo::new().as_value(),);
+    info!(instance_info = InstanceInfo::new().as_value());
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
