@@ -39,26 +39,31 @@ const EV_PER_SECOND: u64 = 100;
 fn stream(
     sender: tokio::sync::watch::Sender<Vec<f32>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn_blocking(move || {
-        gst::init().expect("initialization failed");
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    gst::init().context("initialization failed")?;
 
-        let pipeline_str = format!("
-            udpsrc port={GST_PORT} caps=\"audio/x-raw,rate={SAMPLING_RATE},channels=1,format=S16LE\" !
-            queue !
-            spectrum name=spec interval=500000 bands=4096 threshold=-{DB_THRESHOLD} ! fakesink
-            ");
+    let pipeline_str = format!(
+        "
+        udpsrc port={GST_PORT} caps=\"audio/x-raw,rate={SAMPLING_RATE},channels=1,format=S16LE\" !
+        queue !
+        spectrum name=spec interval=500000 bands=4096 threshold=-{DB_THRESHOLD} ! fakesink
+        "
+    );
 
-        let pipeline = gst::parse::launch(pipeline_str.as_str()).expect("pipeline creation failed");
+    let pipeline = gst::parse::launch(pipeline_str.as_str())
+        .context(format!("pipeline creation failed {pipeline_str}"))?;
 
-        pipeline
-            .set_state(gst::State::Playing)
-            .expect("unable to set the pipeline to the `Playing` state");
+    pipeline.set_state(gst::State::Playing).context(format!(
+        "cannot set the pipeline to the `Playing` state {pipeline_str}"
+    ))?;
 
-        let bus = pipeline.bus().unwrap();
+    let bus = pipeline
+        .bus()
+        .context(format!("cannot get pipeline bus {pipeline_str}"))?;
 
-        info!(port = GST_PORT, "gstreamer started listening");
+    info!(port = GST_PORT, "gstreamer started listening");
 
+    Ok(tokio::task::spawn_blocking(move || {
         loop {
             if cancel_token.is_cancelled() {
                 break;
@@ -115,7 +120,7 @@ fn stream(
             .expect("Unable to set the pipeline to the `Null` state");
 
         info!(port = GST_PORT, "gstreamer finished listening");
-    })
+    }))
 }
 
 struct AppState {
@@ -259,7 +264,7 @@ impl InstanceInfo {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let _logging_guard = init_logging();
 
     info!(build_info = BuildInfo::new().as_value());
@@ -270,14 +275,14 @@ async fn main() {
     let (gst_in, gst_out) = tokio::sync::watch::channel(vec![0.0]);
     let (web_in, web_out) = tokio::sync::broadcast::channel(1);
 
-    let stream_handle = stream(gst_in, cancel_token.clone());
+    let stream_handle =
+        stream(gst_in, cancel_token.clone()).context("cannot create gstreamer pipeline")?;
     let transformer = transform_data(gst_out, web_in, cancel_token.clone());
 
     let shared_state = Arc::new(AppState { rx: web_out });
     let web_server_handle = serve_web(shared_state, cancel_token.clone())
         .await
-        .context("cannot create sse server")
-        .unwrap();
+        .context("cannot create sse server")?;
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
@@ -297,7 +302,9 @@ async fn main() {
         }
     }
 
-    stream_handle.await.unwrap();
-    transformer.await.unwrap();
-    web_server_handle.await.unwrap();
+    stream_handle.await?;
+    transformer.await?;
+    web_server_handle.await?;
+
+    Ok(())
 }
