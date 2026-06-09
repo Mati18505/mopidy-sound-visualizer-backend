@@ -6,6 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    task::Poll,
     time::SystemTime,
 };
 
@@ -17,6 +18,7 @@ use axum::{
     routing::get,
 };
 use build_time::build_time_local;
+use futures_util::pin_mut;
 use gstreamer::prelude::*;
 use gstreamer::{self as gst};
 use serde::Serialize;
@@ -36,91 +38,103 @@ const GST_PORT: u16 = 5556;
 const DB_THRESHOLD: u8 = 100;
 const EV_PER_SECOND: u64 = 100;
 
-fn stream(
-    sender: tokio::sync::watch::Sender<Vec<f32>>,
-    cancel_token: tokio_util::sync::CancellationToken,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    gst::init().context("initialization failed")?;
+struct GstStream {
+    bus: gst::Bus,
+    pipeline: gst::Element,
+}
 
-    let pipeline_str = format!(
-        "
-        udpsrc port={GST_PORT} caps=\"audio/x-raw,rate={SAMPLING_RATE},channels=1,format=S16LE\" !
-        queue !
-        spectrum name=spec interval=500000 bands=4096 threshold=-{DB_THRESHOLD} ! fakesink
-        "
-    );
+impl GstStream {
+    fn new() -> anyhow::Result<Self> {
+        // It has once underneath, so initializing multiple times (when creating multiple instances of
+        // GstStream) does nothing.
+        gst::init().context("initialization failed")?;
 
-    let pipeline = gst::parse::launch(pipeline_str.as_str())
-        .context(format!("pipeline creation failed {pipeline_str}"))?;
+        let pipeline_str = format!(
+            "
+            udpsrc port={GST_PORT} caps=\"audio/x-raw,rate={SAMPLING_RATE},channels=1,format=S16LE\" !
+            queue !
+            spectrum name=spec interval=500000 bands=4096 threshold=-{DB_THRESHOLD} ! fakesink
+            "
+        );
 
-    pipeline.set_state(gst::State::Playing).context(format!(
-        "cannot set the pipeline to the `Playing` state {pipeline_str}"
-    ))?;
+        let pipeline = gst::parse::launch(pipeline_str.as_str())
+            .context(format!("pipeline creation failed {pipeline_str}"))?;
 
-    let bus = pipeline
-        .bus()
-        .context(format!("cannot get pipeline bus {pipeline_str}"))?;
+        pipeline.set_state(gst::State::Playing).context(format!(
+            "cannot set the pipeline to the `Playing` state {pipeline_str}"
+        ))?;
 
-    info!(port = GST_PORT, "gstreamer started listening");
+        let bus = pipeline
+            .bus()
+            .context(format!("cannot get pipeline bus {pipeline_str}"))?;
 
-    Ok(tokio::task::spawn_blocking(move || {
-        loop {
-            if cancel_token.is_cancelled() {
-                break;
-            }
+        info!(port = GST_PORT, "gstreamer started listening");
 
-            let msg = bus.timed_pop_filtered(
-                gst::ClockTime::from_mseconds(10),
-                &[
-                    gst::MessageType::Error,
-                    gst::MessageType::Eos,
-                    gst::MessageType::Element,
-                ],
-            );
+        Ok(Self { bus, pipeline })
+    }
+}
 
-            let Some(msg) = msg else {
-                continue;
-            };
+impl futures_util::Stream for GstStream {
+    type Item = Vec<f32>;
 
-            use gst::MessageView;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let msg = self.bus.pop_filtered(&[
+            gst::MessageType::Error,
+            gst::MessageType::Eos,
+            gst::MessageType::Element,
+        ]);
 
-            match msg.view() {
-                MessageView::Element(element_msg) => {
-                    if let Some(magnitudes) = element_msg
-                        .structure()
-                        .filter(|s| s.name() == "spectrum")
-                        .and_then(|s| s.get::<gst::List>("magnitude").ok())
-                    {
-                        let magnitudes: Vec<f32> = magnitudes
-                            .as_slice()
-                            .iter()
-                            .map(|v| v.get::<f32>().unwrap())
-                            .collect();
-                        let _ = sender.send_replace(magnitudes);
+        let Some(msg) = msg else {
+            return Poll::Pending;
+        };
 
-                        GST.fetch_add(1, Ordering::Relaxed);
-                    }
+        use gst::MessageView;
+
+        match msg.view() {
+            MessageView::Element(element_msg) => {
+                if let Some(magnitudes) = element_msg
+                    .structure()
+                    .filter(|s| s.name() == "spectrum")
+                    .and_then(|s| s.get::<gst::List>("magnitude").ok())
+                {
+                    let magnitudes: Vec<f32> = magnitudes
+                        .as_slice()
+                        .iter()
+                        .map(|v| v.get::<f32>().unwrap())
+                        .collect();
+
+                    GST.fetch_add(1, Ordering::Relaxed);
+                    Poll::Ready(Some(magnitudes))
+                } else {
+                    Poll::Pending
                 }
-                MessageView::Eos(..) => break,
-                MessageView::Error(err) => {
-                    error!(
-                        "Error from {:?}: {} ({:?})",
-                        err.src().map(|s| s.path_string()),
-                        err.error(),
-                        err.debug()
-                    );
-                    break;
-                }
-                _ => (),
             }
+            MessageView::Eos(..) => Poll::Ready(None),
+            MessageView::Error(err) => {
+                error!(
+                    "Error from {:?}: {} ({:?})",
+                    err.src().map(|s| s.path_string()),
+                    err.error(),
+                    err.debug()
+                );
+                Poll::Ready(None)
+            }
+            _ => Poll::Pending,
         }
+    }
+}
 
-        pipeline
+impl Drop for GstStream {
+    fn drop(&mut self) {
+        self.pipeline
             .set_state(gst::State::Null)
             .expect("Unable to set the pipeline to the `Null` state");
 
         info!(port = GST_PORT, "gstreamer finished listening");
-    }))
+    }
 }
 
 struct AppState {
@@ -275,8 +289,7 @@ async fn main() -> anyhow::Result<()> {
     let (gst_in, gst_out) = tokio::sync::watch::channel(vec![0.0]);
     let (web_in, web_out) = tokio::sync::broadcast::channel(1);
 
-    let stream_handle =
-        stream(gst_in, cancel_token.clone()).context("cannot create gstreamer pipeline")?;
+    let gst_stream = GstStream::new().context("cannot create gstreamer pipeline")?;
     let transformer = transform_data(gst_out, web_in, cancel_token.clone());
 
     let shared_state = Arc::new(AppState { rx: web_out });
@@ -285,6 +298,8 @@ async fn main() -> anyhow::Result<()> {
         .context("cannot create sse server")?;
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+    pin_mut!(gst_stream);
 
     loop {
         tokio::select! {
@@ -299,10 +314,18 @@ async fn main() -> anyhow::Result<()> {
                     sse = SSE.swap(0, Ordering::Relaxed),
                 );
             },
+            received = gst_stream.next() => {
+                if received.is_none() {
+                    debug!("Gstreamer stream finished.");
+                    cancel_token.cancel();
+                    break
+                }
+
+                received.map(|magnitudes| gst_in.send_replace(magnitudes));
+            }
         }
     }
 
-    stream_handle.await?;
     transformer.await?;
     web_server_handle.await?;
 
