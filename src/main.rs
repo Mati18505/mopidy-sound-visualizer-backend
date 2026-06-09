@@ -311,13 +311,16 @@ async fn main() -> anyhow::Result<()> {
                 );
             },
             received = gst_stream.next() => {
-                if received.is_none() {
-                    debug!("Gstreamer stream finished.");
-                    cancel_token.cancel();
-                    break
+                match received {
+                    Some(magnitudes) => {
+                        gst_in.send_replace(magnitudes);
+                    },
+                    None => {
+                        debug!("Gstreamer stream finished.");
+                        cancel_token.cancel();
+                        break
+                    },
                 }
-
-                received.map(|magnitudes| gst_in.send_replace(magnitudes));
             }
         }
     }
