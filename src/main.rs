@@ -2,6 +2,7 @@ use std::{
     convert::Infallible,
     net::SocketAddrV4,
     ops::Deref,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -39,8 +40,8 @@ const DB_THRESHOLD: u8 = 100;
 const EV_PER_SECOND: u64 = 100;
 
 struct GstStream {
-    bus: gst::Bus,
     pipeline: gst::Element,
+    stream: gst::bus::BusStream,
 }
 
 impl GstStream {
@@ -67,10 +68,11 @@ impl GstStream {
         let bus = pipeline
             .bus()
             .context(format!("cannot get pipeline bus {pipeline_str}"))?;
+        let stream = bus.stream();
 
         info!(port = GST_PORT, "gstreamer started listening");
 
-        Ok(Self { bus, pipeline })
+        Ok(Self { pipeline, stream })
     }
 }
 
@@ -78,51 +80,45 @@ impl futures_util::Stream for GstStream {
     type Item = Vec<f32>;
 
     fn poll_next(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let msg = self.bus.pop_filtered(&[
-            gst::MessageType::Error,
-            gst::MessageType::Eos,
-            gst::MessageType::Element,
-        ]);
-
-        let Some(msg) = msg else {
-            return Poll::Pending;
-        };
-
         use gst::MessageView;
 
-        match msg.view() {
-            MessageView::Element(element_msg) => {
-                if let Some(magnitudes) = element_msg
-                    .structure()
-                    .filter(|s| s.name() == "spectrum")
-                    .and_then(|s| s.get::<gst::List>("magnitude").ok())
-                {
-                    let magnitudes: Vec<f32> = magnitudes
-                        .as_slice()
-                        .iter()
-                        .map(|v| v.get::<f32>().unwrap())
-                        .collect();
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(Some(msg)) => match msg.view() {
+                MessageView::Element(element_msg) => {
+                    if let Some(magnitudes) = element_msg
+                        .structure()
+                        .filter(|s| s.name() == "spectrum")
+                        .and_then(|s| s.get::<gst::List>("magnitude").ok())
+                    {
+                        let magnitudes: Vec<f32> = magnitudes
+                            .as_slice()
+                            .iter()
+                            .map(|v| v.get::<f32>().unwrap())
+                            .collect();
 
-                    GST.fetch_add(1, Ordering::Relaxed);
-                    Poll::Ready(Some(magnitudes))
-                } else {
-                    Poll::Pending
+                        GST.fetch_add(1, Ordering::Relaxed);
+                        Poll::Ready(Some(magnitudes))
+                    } else {
+                        Poll::Pending
+                    }
                 }
-            }
-            MessageView::Eos(..) => Poll::Ready(None),
-            MessageView::Error(err) => {
-                error!(
-                    "Error from {:?}: {} ({:?})",
-                    err.src().map(|s| s.path_string()),
-                    err.error(),
-                    err.debug()
-                );
-                Poll::Ready(None)
-            }
-            _ => Poll::Pending,
+                MessageView::Eos(..) => Poll::Ready(None),
+                MessageView::Error(err) => {
+                    error!(
+                        "Error from {:?}: {} ({:?})",
+                        err.src().map(|s| s.path_string()),
+                        err.error(),
+                        err.debug()
+                    );
+                    Poll::Ready(None)
+                }
+                _ => Poll::Pending,
+            },
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
